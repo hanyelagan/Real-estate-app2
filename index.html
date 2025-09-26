@@ -3035,7 +3035,25 @@ this.properties[index] = propertyData;
 this.properties.push(propertyData);
 }
 // حفظ في التخزين المحلي
-localStorage.setItem('realEstateProperties', JSON.stringify(this.properties));
+
+        // قبل الحفظ: إذا العقار الحالي كان مستوردًا، نزيل وسم المستورد من هذا العقار فقط (لا نغير الحالة لباقي العقارات المستوردة)
+        if (wasImported) {
+          const matchIndex = this.properties.findIndex(p =>
+            p && (p.id === propertyData.id || (p.propertyNumber === propertyData.propertyNumber && p.street === propertyData.street && p.district === propertyData.district))
+          );
+          if (matchIndex !== -1) {
+            const target = this.properties[matchIndex];
+            try { delete target._imported; } catch(e) {}
+            try { delete target.imported; } catch(e) {}
+            try { if (target._status === 'imported') delete target._status; } catch(e) {}
+          } else {
+            try { delete propertyData._imported; } catch(e) {}
+            try { delete propertyData.imported; } catch(e) {}
+            try { if (propertyData._status === 'imported') delete propertyData._status; } catch(e) {}
+          }
+        }
+        localStorage.setItem('realEstateProperties', JSON.stringify(this.properties));
+
 // تحديث واجهة المستخدم
 this.currentProperty = propertyData;
 this.updateMap();
@@ -3685,7 +3703,7 @@ container.appendChild(unitCard);
 // ======== وظائف الاستمارات الرسمية ========
 // تعبئة استمارة الحصر
 fillOfficialForm1: function(property) {
-if (!property) return;
+if (!property) return; if (property._imported) return;
     const isImported = !!(property._imported || property.imported || property.source === 'import');
     const importedBadge = isImported
       ? '<span class="property-badge badge-imported">مستورد</span>'
@@ -3737,7 +3755,7 @@ tbody.appendChild(tr);
 },
 // تعبئة استمارة 32
 fillOfficialForm2: function(property) {
-if (!property) return;
+if (!property) return; if (property._imported) return;
 // تحديث عنوان الاستمارة
 document.getElementById('form2-header').innerHTML = `
 <td colspan="35" class="merged-cell">
@@ -4990,23 +5008,34 @@ console.log('فشل تسجيل ServiceWorker: ', error);
 }
 </script>
 <script>
+
 function calculateStatistics() {
-    // Get properties from localStorage or global variable (simulate storage)
-    let properties = JSON.parse(localStorage.getItem("savedProperties") || "[]");
-    let units = JSON.parse(localStorage.getItem("savedUnits") || "[]");
+    // قراءة العقارات من المفتاح الحقيقي المستخدم في التطبيق
+    const properties = JSON.parse(localStorage.getItem('realEstateProperties') || '[]').filter(p => !(p && (p._imported === true || p.imported === true || p._status === 'imported')));
 
-    let totalProperties = properties.length;
-    let totalUnits = units.length;
+    // بناء مصفوفة الوحدات من داخل كل عقار (الوحدات مخزنة داخل property.units)
+    let units = [];
+    properties.forEach(p => {
+        const pUnits = Array.isArray(p.units) ? p.units : [];
+        pUnits.forEach(u => {
+            // ضع مرجعًا لرقم العقار داخل الوحدة إذا لم يكن موجودًا
+            if (!u.propertyNumber) u.propertyNumber = p.propertyNumber || p.id || null;
+            // احتفظ بمعلومات الشارع في الوحدة إن لم تكن موجودة
+            if (!u.street) u.street = p.street || 'غير محدد';
+            units.push(u);
+        });
+    });
 
-    // Totals
+    const totalProperties = properties.length;
+    const totalUnits = units.length;
+
     let totalRental = 0;
     let totalTax = 0;
 
-    // Street-based stats
     let streetStats = {};
 
     units.forEach(unit => {
-        let street = unit.street || "غير محدد";
+        const street = unit.street || 'غير محدد';
         if (!streetStats[street]) {
             streetStats[street] = {
                 properties: new Set(),
@@ -5018,36 +5047,45 @@ function calculateStatistics() {
             };
         }
         let s = streetStats[street];
-        if (unit.propertyNumber) {
-            s.properties.add(unit.propertyNumber);
-        }
-        switch (unit.useType) {
+        if (unit.propertyNumber) s.properties.add(unit.propertyNumber);
+
+        // استخدام useType كما يُعرّف في النموذج (residential, commercial, space, utilized_space ...)
+        switch ((unit.useType || '').toString()) {
             case "residential": s.residential++; break;
             case "commercial": s.commercial++; break;
             case "space":
             case "utilized_space": s.space++; break;
+            default: break;
         }
-        if (unit.rentalValue) {
-            s.rental += parseFloat(unit.rentalValue) || 0;
-            totalRental += parseFloat(unit.rentalValue) || 0;
-        }
-        if (unit.taxValue) {
-            s.tax += parseFloat(unit.taxValue) || 0;
-            totalTax += parseFloat(unit.taxValue) || 0;
-        }
+
+        // نقرأ قيم الإيجار والضريبة من الحقول المحتملة بطريقة مرنة
+        const rentalNum = parseFloat(unit.rentalValue || unit.netRentalValue || unit.rental || 0) || 0;
+        const taxNum = parseFloat(unit.tax || unit.taxValue || 0) || 0;
+
+        s.rental += rentalNum;
+        s.tax += taxNum;
+        totalRental += rentalNum;
+        totalTax += taxNum;
     });
 
-    // Update summary cards
-    document.getElementById("total-properties").textContent = totalProperties;
-    document.getElementById("total-units").textContent = totalUnits;
-    document.getElementById("total-rental").textContent = totalRental.toFixed(2);
-    document.getElementById("total-tax").textContent = totalTax.toFixed(2);
+    // تحديث البطاقات الملخصة إن وُجدت العناصر
+    const elTotalProperties = document.getElementById("total-properties");
+    const elTotalUnits = document.getElementById("total-units");
+    const elTotalRental = document.getElementById("total-rental");
+    const elTotalTax = document.getElementById("total-tax");
+    if (elTotalProperties) elTotalProperties.textContent = totalProperties;
+    if (elTotalUnits) elTotalUnits.textContent = totalUnits;
+    if (elTotalRental) elTotalRental.textContent = totalRental.toFixed ? totalRental.toFixed(2) : totalRental;
+    if (elTotalTax) elTotalTax.textContent = totalTax.toFixed ? totalTax.toFixed(2) : totalTax;
 
-    // Update street stats table
-    let tbody = document.getElementById("street-stats-body");
+    // تحديث جدول إحصائيات الشوارع
+    const tbody = document.getElementById("street-stats-body");
+    if (!tbody) return;
     tbody.innerHTML = "";
+        const filteredProps = this.properties.filter(p => !p._imported);
+        
     if (Object.keys(streetStats).length === 0) {
-        tbody.innerHTML = '<tr class="empty-data-row"><td colspan="7"><div class="empty-data"><i class="fas fa-inbox"></i><h3>لا توجد بيانات إحصائية بعد</h3><p>سيتم عرض الإحصائيات بعد إضافة عقارات ووحدات</p></div></td></tr>';
+        tbody.innerHTML = '<tr class="empty-data-row"><td colspan="7"><div class="empty-message"><p>لا توجد بيانات لإظهارها — يتم عرض الإحصائيات بعد إضافة عقارات ووحدات</p></div></td></tr>';
     } else {
         for (let street in streetStats) {
             let s = streetStats[street];
@@ -5058,17 +5096,19 @@ function calculateStatistics() {
                 <td>${s.residential}</td>
                 <td>${s.commercial}</td>
                 <td>${s.space}</td>
-                <td>${s.rental.toFixed(2)}</td>
-                <td>${s.tax.toFixed(2)}</td>
+                <td>${(s.rental).toFixed ? s.rental.toFixed(2) : s.rental}</td>
+                <td>${(s.tax).toFixed ? s.tax.toFixed(2) : s.tax}</td>
             `;
             tbody.appendChild(tr);
         }
     }
 }
 
+
 // Run stats calculation when statistics section is opened
 document.addEventListener("DOMContentLoaded", () => {
-    document.querySelector("[data-target='stats-section']").addEventListener("click", calculateStatistics);
+    const __statsBtn = document.querySelector("[data-target='stats-section']") || document.getElementById('stats-section') || document.querySelector('.open-stats');
+if (__statsBtn) __statsBtn.addEventListener('click', () => { if (typeof calculateStatistics === 'function') calculateStatistics(); });
 });
 </script>
 <script>
@@ -5091,10 +5131,13 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 </script>
 <script>
-  function updatePropertiesCount() {
-    const saved = JSON.parse(localStorage.getItem("savedProperties") || "[]");
-    document.getElementById("properties-count").textContent = saved.length;
-  }
+  
+function updatePropertiesCount() {
+    const saved = JSON.parse(localStorage.getItem('realEstateProperties') || '[]').filter(p => !(p && (p._imported === true || p.imported === true || p._status === 'imported')));
+    const el = document.getElementById("properties-count");
+    if (el) el.textContent = saved.length;
+}
+
 
   document.getElementById("save-property").addEventListener("click", function () {
     setTimeout(updatePropertiesCount, 300);
@@ -5107,30 +5150,39 @@ document.addEventListener("DOMContentLoaded", () => {
   window.addEventListener("load", updatePropertiesCount);
 </script>
 <script>
-  function updateStats() {
-    const saved = JSON.parse(localStorage.getItem("savedProperties") || "[]");
-    const units = JSON.parse(localStorage.getItem("savedUnits") || "[]");
-
-    // إجمالي العقارات
-    document.getElementById("total-properties").textContent = saved.length;
-
-    // إجمالي الوحدات
-    document.getElementById("total-units").textContent = units.length;
-
-    // حساب المساحة الإجمالية
-    let totalArea = 0;
-    saved.forEach(p => {
-      if (p.area) totalArea += Number(p.area);
+  
+function updateStats() {
+    const properties = JSON.parse(localStorage.getItem('realEstateProperties') || '[]').filter(p => !(p && (p._imported === true || p.imported === true || p._status === 'imported')));
+    // اجمع الوحدات من العقارات
+    let units = [];
+    properties.forEach(p => {
+        const pUnits = Array.isArray(p.units) ? p.units : [];
+        pUnits.forEach(u => {
+            if (!u.propertyNumber) u.propertyNumber = p.propertyNumber || p.id || null;
+            units.push(u);
+        });
     });
-    document.getElementById("total-area").textContent = totalArea;
+
+    const elTotalProperties = document.getElementById("total-properties");
+    const elTotalUnits = document.getElementById("total-units");
+    const elTotalArea = document.getElementById("total-area");
+
+    if (elTotalProperties) elTotalProperties.textContent = properties.length;
+    if (elTotalUnits) elTotalUnits.textContent = units.length;
+
+    let totalArea = 0;
+    properties.forEach(p => { totalArea += Number(p.area || 0); });
+    if (elTotalArea) elTotalArea.textContent = totalArea;
+}
+
+
+  // تحديث عند تحميل الصفحة و بعد عمليات الحفظ/استيراد — استدعاء الدالة الشاملة calculateStatistics إن وُجدت
+  const safeCalculate = (typeof calculateStatistics === 'function') ? calculateStatistics : (typeof updateStats === 'function' ? updateStats : null);
+  if (safeCalculate) {
+    window.addEventListener('load', safeCalculate);
+    document.getElementById('save-property')?.addEventListener('click', () => setTimeout(safeCalculate, 300));
+    document.getElementById('import-properties')?.addEventListener('click', () => setTimeout(safeCalculate, 500));
   }
-
-  // تحديث عند تحميل الصفحة
-  window.addEventListener("load", updateStats);
-
-  // تحديث بعد حفظ أو استيراد
-  document.getElementById("save-property").addEventListener("click", () => setTimeout(updateStats, 300));
-  document.getElementById("import-properties").addEventListener("click", () => setTimeout(updateStats, 500));
 </script>
 <script>
 // --- الكود الخاص باحتساب القيم ---
